@@ -11,6 +11,33 @@ from uuid import uuid4
 
 from soul.config import AgentConfig
 
+TOKEN_RE = re.compile(r"[a-z0-9]+")
+NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
+NON_ALNUM_SPACE_RE = re.compile(r"[^a-z0-9 ]")
+MULTISPACE_RE = re.compile(r"\s+")
+
+IGNORED_WORKSPACE_DIRS = {
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".soul",
+}
+IGNORED_WORKSPACE_SUFFIXES = {
+    ".pyc",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".pdf",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".db",
+}
+
 
 def _normalize_text(text: str) -> str:
     return " ".join(text.lower().split())
@@ -19,12 +46,17 @@ def _normalize_text(text: str) -> str:
 def _query_terms(text: str) -> list[str]:
     seen: set[str] = set()
     terms: list[str] = []
-    for term in re.findall(r"[a-z0-9]+", text.lower()):
+    for term in TOKEN_RE.findall(text.lower()):
         if len(term) < 2 or term in seen:
             continue
         seen.add(term)
         terms.append(term)
     return terms
+
+
+def _normalize_for_dedupe(text: str) -> str:
+    cleaned = NON_ALNUM_SPACE_RE.sub("", text.lower())
+    return MULTISPACE_RE.sub(" ", cleaned).strip()
 
 
 @dataclass(slots=True)
@@ -76,13 +108,12 @@ class MemoryStore:
         self._workspace_root = config.workspace_root
         self._max_excerpt_chars = config.max_excerpt_chars
 
-    def ensure_ready(self) -> Path:
+    def _ensure_ready(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._daily_dir.mkdir(parents=True, exist_ok=True)
         self._index_path.parent.mkdir(parents=True, exist_ok=True)
         if not self._path.exists():
             self._path.write_text("", encoding="utf-8")
-        return self._path
 
     def append(self, *, text: str, kind: str, tags: list[str]) -> MemoryEntry:
         entry = MemoryEntry(
@@ -92,14 +123,14 @@ class MemoryStore:
             tags=tags,
             created_at=datetime.now(UTC).isoformat(),
         )
-        self.ensure_ready()
+        self._ensure_ready()
         with self._daily_path().open("a", encoding="utf-8") as handle:
             handle.write(entry.text.strip() + "\n\n")
         self._refresh_index(self._memory_records())
         return entry
 
     def reset(self) -> None:
-        self.ensure_ready()
+        self._ensure_ready()
         self._path.write_text("", encoding="utf-8")
         for path in self._daily_dir.glob("*.md"):
             path.unlink()
@@ -120,7 +151,11 @@ class MemoryStore:
 
         self._refresh_index(records)
         records_by_rowid = {index: record for index, record in enumerate(records, start=1)}
-        candidates = self._search_index(match_query=match_query, limit=max(limit * 8, limit), records_by_rowid=records_by_rowid)
+        candidates = self._search_index(
+            match_query=match_query,
+            limit=max(limit * 8, limit),
+            records_by_rowid=records_by_rowid,
+        )
         ranked = self._rank_candidates(query=query, candidates=candidates)
         return self._dedupe_entries([entry for _, _, _, entry in ranked], limit)
 
@@ -157,7 +192,7 @@ class MemoryStore:
         return matches[:limit]
 
     def _memory_records(self) -> list[IndexedMemoryRecord]:
-        self.ensure_ready()
+        self._ensure_ready()
         records: list[IndexedMemoryRecord] = []
         records.extend(self._records_for_plaintext(self._path, kind="curated", source_priority=6))
         for path in sorted(self._daily_dir.glob("*.md")):
@@ -273,41 +308,19 @@ class MemoryStore:
         return " OR ".join(f'"{term}"' for term in terms)
 
     def _connect_index(self) -> sqlite3.Connection:
-        self.ensure_ready()
+        self._ensure_ready()
         connection = sqlite3.connect(self._index_path)
         connection.row_factory = sqlite3.Row
         return connection
 
     def _iter_workspace_files(self) -> list[Path]:
-        ignored_dirs = {
-            ".git",
-            ".venv",
-            "__pycache__",
-            "node_modules",
-            ".mypy_cache",
-            ".pytest_cache",
-            ".soul",
-        }
-        ignored_suffixes = {
-            ".pyc",
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".gif",
-            ".pdf",
-            ".zip",
-            ".tar",
-            ".gz",
-            ".db",
-        }
-
         files: list[Path] = []
         for path in self._workspace_root.rglob("*"):
             if not path.is_file():
                 continue
-            if any(part in ignored_dirs for part in path.parts):
+            if any(part in IGNORED_WORKSPACE_DIRS for part in path.parts):
                 continue
-            if path.suffix.lower() in ignored_suffixes:
+            if path.suffix.lower() in IGNORED_WORKSPACE_SUFFIXES:
                 continue
             files.append(path)
         return files
@@ -315,7 +328,7 @@ class MemoryStore:
     def _build_excerpt(self, text: str, query_terms: set[str]) -> str:
         words = text.split()
         for idx, word in enumerate(words):
-            token = re.sub(r"[^a-z0-9]", "", word.lower())
+            token = NON_ALNUM_RE.sub("", word.lower())
             if token in query_terms:
                 start = max(0, idx - 20)
                 end = min(len(words), idx + 20)
@@ -354,7 +367,7 @@ class MemoryStore:
         deduped: list[MemoryEntry] = []
         seen: set[str] = set()
         for entry in entries:
-            normalized = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", entry.text.lower())).strip()
+            normalized = _normalize_for_dedupe(entry.text)
             if not normalized or normalized in seen:
                 continue
             seen.add(normalized)
@@ -382,7 +395,7 @@ class MemoryStore:
             if not text:
                 continue
             raw_tags = payload.get("tags", [])
-            tags = [str(tag).strip() for tag in raw_tags if str(tag).strip()] if isinstance(raw_tags, list) else []
+            tags = self._coerce_tags(raw_tags)
             entries.append(
                 MemoryEntry(
                     id=str(payload.get("id", "")),
@@ -393,6 +406,16 @@ class MemoryStore:
                 )
             )
         return entries
+
+    def _coerce_tags(self, raw_tags: object) -> list[str]:
+        if not isinstance(raw_tags, list):
+            return []
+        tags: list[str] = []
+        for raw_tag in raw_tags:
+            tag = str(raw_tag).strip()
+            if tag:
+                tags.append(tag)
+        return tags
 
 
 __all__ = ["FileMemoryMatch", "MemoryEntry", "MemoryStore"]
