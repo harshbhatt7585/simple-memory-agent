@@ -11,6 +11,34 @@ from soul.agent.memory import MemoryStore
 from soul.config import AgentConfig
 
 
+def _parse_result_limit(value: Any, *, upper_bound: int) -> int:
+    try:
+        return max(1, min(int(value), upper_bound))
+    except (TypeError, ValueError):
+        return upper_bound
+
+
+def _function_schema(
+    *,
+    name: str,
+    description: str,
+    properties: dict[str, Any],
+    required: list[str],
+) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        },
+    }
+
+
 class Tools(ABC):
     description = ""
 
@@ -105,11 +133,7 @@ class MemoryRecallAgentTool(Tools):
         if not query:
             return {"ok": False, "tool": self.name, "error": "missing query"}
 
-        limit = args.get("limit", self._config.search_limit)
-        try:
-            max_results = max(1, min(int(limit), self._config.search_limit))
-        except (TypeError, ValueError):
-            max_results = self._config.search_limit
+        max_results = _parse_result_limit(args.get("limit", self._config.search_limit), upper_bound=self._config.search_limit)
 
         matches = self._store.search(query=query, limit=max_results)
         file_matches = [] if matches else self._store.search_workspace(query=query, limit=max_results)
@@ -124,21 +148,15 @@ class MemoryRecallAgentTool(Tools):
         }
 
     def schema(self) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "What memory to search for."},
-                        "limit": {"type": "integer", "description": "Maximum number of memories to return."},
-                    },
-                    "required": ["query"],
-                },
+        return _function_schema(
+            name=self.name,
+            description=self.description,
+            properties={
+                "query": {"type": "string", "description": "What memory to search for."},
+                "limit": {"type": "integer", "description": "Maximum number of memories to return."},
             },
-        }
+            required=["query"],
+        )
 
 
 class MemoryWriteAgentTool(Tools):
@@ -164,26 +182,20 @@ class MemoryWriteAgentTool(Tools):
         }
 
     def schema(self) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string", "description": "Memory text to store."},
-                        "kind": {"type": "string", "description": "Memory kind such as note or preference."},
-                        "tags": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Optional tags for later recall.",
-                        },
-                    },
-                    "required": ["text"],
+        return _function_schema(
+            name=self.name,
+            description=self.description,
+            properties={
+                "text": {"type": "string", "description": "Memory text to store."},
+                "kind": {"type": "string", "description": "Memory kind such as note or preference."},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional tags for later recall.",
                 },
             },
-        }
+            required=["text"],
+        )
 
 
 class WebSearchAgentTool(Tools):
@@ -200,11 +212,7 @@ class WebSearchAgentTool(Tools):
         if not self._config.tavily_api_key:
             return {"ok": False, "tool": self.name, "error": "missing TAVILY_API_KEY", "query": query}
 
-        limit = args.get("limit", self._config.search_limit)
-        try:
-            max_results = max(1, min(int(limit), self._config.search_limit))
-        except (TypeError, ValueError):
-            max_results = self._config.search_limit
+        max_results = _parse_result_limit(args.get("limit", self._config.search_limit), upper_bound=self._config.search_limit)
 
         topic = str(args.get("topic", "general")).strip().lower() or "general"
         if topic not in {"general", "news"}:
@@ -286,26 +294,20 @@ class WebSearchAgentTool(Tools):
         return response_payload
 
     def schema(self) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query."},
-                        "topic": {
-                            "type": "string",
-                            "enum": ["general", "news"],
-                            "description": "Whether the query is general web search or news-focused.",
-                        },
-                        "limit": {"type": "integer", "description": "Maximum number of results to return."},
-                    },
-                    "required": ["query"],
+        return _function_schema(
+            name=self.name,
+            description=self.description,
+            properties={
+                "query": {"type": "string", "description": "Search query."},
+                "topic": {
+                    "type": "string",
+                    "enum": ["general", "news"],
+                    "description": "Whether the query is general web search or news-focused.",
                 },
+                "limit": {"type": "integer", "description": "Maximum number of results to return."},
             },
-        }
+            required=["query"],
+        )
 
 
 class WebFetchAgentTool(Tools):
@@ -346,20 +348,14 @@ class WebFetchAgentTool(Tools):
         }
 
     def schema(self) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL to fetch."},
-                    },
-                    "required": ["url"],
-                },
+        return _function_schema(
+            name=self.name,
+            description=self.description,
+            properties={
+                "url": {"type": "string", "description": "URL to fetch."},
             },
-        }
+            required=["url"],
+        )
 
 
 class HTMLPraserAgentTool(Tools):
@@ -390,20 +386,14 @@ class HTMLPraserAgentTool(Tools):
         }
 
     def schema(self) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "html": {"type": "string", "description": "Raw HTML to parse."},
-                    },
-                    "required": ["html"],
-                },
+        return _function_schema(
+            name=self.name,
+            description=self.description,
+            properties={
+                "html": {"type": "string", "description": "Raw HTML to parse."},
             },
-        }
+            required=["html"],
+        )
 
 
 def build_default_tools(config: AgentConfig) -> list[Tools]:
